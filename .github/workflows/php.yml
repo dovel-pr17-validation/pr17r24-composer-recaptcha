@@ -1,0 +1,116 @@
+name: PHP Composer
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.4', '8.5']
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      with:
+        php-version: ${{ matrix.php }}
+        extensions: dom, curl, libxml, mbstring, tokenizer, xml, xmlwriter
+        coverage: xdebug
+
+    - name: Validate composer.json and composer.lock
+      run: composer validate --strict
+
+    - name: Cache Composer packages
+      id: composer-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: vendor
+        key: ${{ runner.os }}-php-${{ matrix.php }}-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-php-${{ matrix.php }}-
+
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress
+
+    - name: Run security audit
+      run: composer audit
+
+    - name: Run linting
+      run: composer run-script lint
+
+    - name: Run static analysis
+      run: composer run-script phpstan
+
+    - name: Run test suite
+      run: composer run-script test
+
+    - name: Upload to Coveralls
+      env:
+        COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        COVERALLS_PARALLEL: true
+        COVERALLS_FLAG_NAME: php-${{ matrix.php }}
+      run: vendor/bin/php-coveralls -v
+
+  backward-compatibility:
+    name: Backward compatibility check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        # The check compares the PR against the last release tag, so it needs
+        # the full history rather than a shallow clone.
+        fetch-depth: 0
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      with:
+        php-version: '8.4'
+
+    # Installed into its own directory at run time rather than through a
+    # docker action or this project's dev dependencies, so the check always
+    # runs with current releases and its dependencies stay out of the
+    # library's own dependency resolution.
+    - name: Install roave/backward-compatibility-check
+      run: |
+        mkdir bc-check
+        cd bc-check
+        composer require --no-interaction "roave/backward-compatibility-check:^8.23"
+
+    - name: Check for BC breaks since the last release
+      run: bc-check/vendor/bin/roave-backward-compatibility-check --format=github-actions
+
+  finish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Coveralls Finished
+      run: |
+        curl https://coveralls.io/webhook?repo_token=${{ secrets.GITHUB_TOKEN }} -d "repo_name=$GITHUB_REPOSITORY&payload[build_num]=${{ github.run_id }}&payload[status]=done"
+
+  deploy-demo:
+    name: Deploy demo
+    needs: [build, backward-compatibility]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Trigger Cloud Build deployment
+      env:
+        WEBHOOK_URL: ${{ secrets.CLOUD_BUILD_DEPLOY_WEBHOOK_URL }}
+      run: |
+        if [ -n "$WEBHOOK_URL" ]; then
+          curl --fail --silent --show-error -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"sha\":\"${{ github.sha }}\"}" \
+            "$WEBHOOK_URL"
+        fi

@@ -1,0 +1,394 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * This is a PHP library that handles calling reCAPTCHA.
+ *
+ * BSD 3-Clause License
+ *
+ * @copyright (c) 2019, Google Inc.
+ *
+ * @see https://www.google.com/recaptcha
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+namespace ReCaptcha\RequestMethod;
+
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
+use PHPUnit\Framework\TestCase;
+use ReCaptcha\ReCaptcha;
+use ReCaptcha\RequestParameters;
+
+/**
+ * Global state for mocking socket functions.
+ */
+class SocketPostGlobalState
+{
+    public static ?string $fsockopenHostname = null;
+    public static int $fsockopenErrno = 0;
+    public static string $fsockopenErrstr = '';
+    public static bool $fsockopenSuccess = true;
+    public static string $fwriteData = '';
+    public static ?int $fwriteChunkSize = null;
+    public static bool $fwriteFails = false;
+
+    /**
+     * @var array<int, false|string>
+     */
+    public static array $fgetsResponses = [];
+    public static int $feofCount = 0;
+    public static bool $fcloseCalled = false;
+    public static bool $streamSetTimeoutSuccess = true;
+    public static ?float $fsockopenTimeout = null;
+    public static ?int $streamTimeoutSeconds = null;
+}
+
+/**
+ * Mock fsockopen in the ReCaptcha\RequestMethod namespace.
+ */
+function fsockopen(string $hostname, int $port = -1, int &$errno = 0, string &$errstr = '', ?float $timeout = null): false|\stdClass
+{
+    SocketPostGlobalState::$fsockopenHostname = $hostname;
+    SocketPostGlobalState::$fsockopenTimeout = $timeout;
+    $errno = SocketPostGlobalState::$fsockopenErrno;
+    $errstr = SocketPostGlobalState::$fsockopenErrstr;
+
+    return SocketPostGlobalState::$fsockopenSuccess ? new \stdClass() : false;
+}
+
+/**
+ * Mock fwrite in the ReCaptcha\RequestMethod namespace.
+ */
+function fwrite(\stdClass $handle, string $string, ?int $length = null): false|int
+{
+    if (SocketPostGlobalState::$fwriteFails) {
+        return false;
+    }
+
+    if (null !== SocketPostGlobalState::$fwriteChunkSize) {
+        $chunk = substr($string, 0, SocketPostGlobalState::$fwriteChunkSize);
+        SocketPostGlobalState::$fwriteData .= $chunk;
+
+        return strlen($chunk);
+    }
+
+    SocketPostGlobalState::$fwriteData .= $string;
+
+    return strlen($string);
+}
+
+/**
+ * Mock stream_get_contents in the ReCaptcha\RequestMethod namespace.
+ */
+function stream_get_contents(\stdClass $handle, ?int $length = null, int $offset = -1): false|string
+{
+    if ([] === SocketPostGlobalState::$fgetsResponses) {
+        return false;
+    }
+
+    $result = '';
+    foreach (SocketPostGlobalState::$fgetsResponses as $response) {
+        if (false !== $response) {
+            $result .= $response;
+        }
+    }
+    SocketPostGlobalState::$fgetsResponses = [];
+
+    return $result;
+}
+
+/**
+ * Mock stream_set_timeout in the ReCaptcha\RequestMethod namespace.
+ */
+function stream_set_timeout(\stdClass $handle, int $seconds, int $microseconds = 0): bool
+{
+    SocketPostGlobalState::$streamTimeoutSeconds = $seconds;
+
+    return SocketPostGlobalState::$streamSetTimeoutSuccess;
+}
+
+/**
+ * Mock fclose in the ReCaptcha\RequestMethod namespace.
+ */
+function fclose(\stdClass $handle): bool
+{
+    SocketPostGlobalState::$fcloseCalled = true;
+
+    return true;
+}
+
+/**
+ * @internal
+ */
+#[CoversClass(SocketPost::class)]
+#[UsesClass(RequestParameters::class)]
+class SocketPostTest extends TestCase
+{
+    protected function setUp(): void
+    {
+        SocketPostGlobalState::$fsockopenHostname = null;
+        SocketPostGlobalState::$fsockopenErrno = 0;
+        SocketPostGlobalState::$fsockopenErrstr = '';
+        SocketPostGlobalState::$fsockopenSuccess = true;
+        SocketPostGlobalState::$fwriteData = '';
+        SocketPostGlobalState::$fwriteChunkSize = null;
+        SocketPostGlobalState::$fwriteFails = false;
+        SocketPostGlobalState::$fgetsResponses = [];
+        SocketPostGlobalState::$fcloseCalled = false;
+        SocketPostGlobalState::$streamSetTimeoutSuccess = true;
+        SocketPostGlobalState::$fsockopenTimeout = null;
+        SocketPostGlobalState::$streamTimeoutSeconds = null;
+    }
+
+    public function testSubmit(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('ssl://www.google.com', SocketPostGlobalState::$fsockopenHostname);
+        $this->assertSame(60.0, SocketPostGlobalState::$fsockopenTimeout);
+        $this->assertSame(60, SocketPostGlobalState::$streamTimeoutSeconds);
+        $this->assertStringContainsString('secret=secret', SocketPostGlobalState::$fwriteData);
+        $this->assertStringContainsString('response=response', SocketPostGlobalState::$fwriteData);
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testCustomTimeout(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost(null, 10);
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertSame(10.0, SocketPostGlobalState::$fsockopenTimeout);
+        $this->assertSame(10, SocketPostGlobalState::$streamTimeoutSeconds);
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testOverrideSiteVerifyUrl(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $url = 'https://custom.recaptcha.net/recaptcha/api/siteverify';
+        $sp = new SocketPost($url);
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('ssl://custom.recaptcha.net', SocketPostGlobalState::$fsockopenHostname);
+        $this->assertStringContainsString('POST /recaptcha/api/siteverify HTTP/1.0', SocketPostGlobalState::$fwriteData);
+        $this->assertStringContainsString('secret=secret', SocketPostGlobalState::$fwriteData);
+        $this->assertStringContainsString('response=response', SocketPostGlobalState::$fwriteData);
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testSubmitReturnsResponseWhenHttp11(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testStreamTimeoutFailureReturnsError(): void
+    {
+        SocketPostGlobalState::$streamSetTimeoutSuccess = false;
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_CONNECTION_FAILED.'"]}', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testConnectionFailureWithValidHandleReturnsError(): void
+    {
+        SocketPostGlobalState::$fsockopenSuccess = true;
+        SocketPostGlobalState::$fsockopenErrno = 1;
+        SocketPostGlobalState::$fsockopenErrstr = 'Connection refused';
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_CONNECTION_FAILED.'"]}', $response);
+    }
+
+    public function testUrlFailureReturnsError(): void
+    {
+        $sp = new SocketPost('invalid_url');
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_CONNECTION_FAILED.'"]}', $response);
+    }
+
+    public function testSubmitWithFgetsFailure(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            false,
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testMalformedResponseReturnsError(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_BAD_RESPONSE.'"]}', $response);
+    }
+
+    public function testConnectionFailureReturnsError(): void
+    {
+        SocketPostGlobalState::$fsockopenSuccess = false;
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_CONNECTION_FAILED.'"]}', $response);
+    }
+
+    public function testBadResponseReturnsError(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 500 Internal Server Error\r\n",
+            "\r\n",
+            'FAIL',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_BAD_RESPONSE.'"]}', $response);
+    }
+
+    public function testStreamGetContentsReturnsFalse(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_BAD_RESPONSE.'"]}', $response);
+    }
+
+    public function testBadResponseReturnsErrorWhenHttp11(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.1 500 Internal Server Error\r\n",
+            "\r\n",
+            'FAIL',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_BAD_RESPONSE.'"]}', $response);
+    }
+
+    public function testBadResponseReturnsErrorWhenHttp2(): void
+    {
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/2.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_BAD_RESPONSE.'"]}', $response);
+    }
+
+    public function testPartialSocketWritesCompleteFullRequest(): void
+    {
+        SocketPostGlobalState::$fwriteChunkSize = 16;
+        SocketPostGlobalState::$fgetsResponses = [
+            "HTTP/1.0 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            'RESPONSEBODY',
+        ];
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertStringContainsString('secret=secret&response=response', SocketPostGlobalState::$fwriteData);
+        $this->assertEquals('RESPONSEBODY', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+
+    public function testFwriteFailureClosesHandleAndReturnsError(): void
+    {
+        SocketPostGlobalState::$fwriteFails = true;
+
+        $sp = new SocketPost();
+        $response = $sp->submit(new RequestParameters('secret', 'response'));
+
+        $this->assertEquals('{"success": false, "error-codes": ["'.ReCaptcha::E_CONNECTION_FAILED.'"]}', $response);
+        $this->assertTrue(SocketPostGlobalState::$fcloseCalled);
+    }
+}
